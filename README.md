@@ -1,0 +1,2 @@
+# biztalkserverreceiver
+BizTalk Server Receiver
