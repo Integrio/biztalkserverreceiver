@@ -1,0 +1,25 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+  biztalkserver:
+    interval: 5s
+    endpoint: http://localhost
+  
+processors:
+  batch:
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp, biztalkserver]
+      processors: [batch]
+      exporters: [debug]
+  telemetry:
+    logs:
+      level: debug
