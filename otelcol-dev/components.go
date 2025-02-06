@@ -14,6 +14,7 @@ import (
 	otlpexporter "go.opentelemetry.io/collector/exporter/otlpexporter"
 	batchprocessor "go.opentelemetry.io/collector/processor/batchprocessor"
 	otlpreceiver "go.opentelemetry.io/collector/receiver/otlpreceiver"
+	biztalkserverreceiver "github.com/Integrio/biztalkserverreceiver/biztalkserverreceiver"
 )
 
 func components() (otelcol.Factories, error) {
@@ -29,12 +30,14 @@ func components() (otelcol.Factories, error) {
 
 	factories.Receivers, err = receiver.MakeFactoryMap(
 		otlpreceiver.NewFactory(),
+		biztalkserverreceiver.NewFactory(),
 	)
 	if err != nil {
 		return otelcol.Factories{}, err
 	}
 	factories.ReceiverModules = make(map[component.Type]string, len(factories.Receivers))
 	factories.ReceiverModules[otlpreceiver.NewFactory().Type()] = "go.opentelemetry.io/collector/receiver/otlpreceiver v0.118.0"
+	factories.ReceiverModules[biztalkserverreceiver.NewFactory().Type()] = "github.com/Integrio/biztalkserverreceiver/biztalkserverreceiver"
 
 	factories.Exporters, err = exporter.MakeFactoryMap(
 		debugexporter.NewFactory(),
