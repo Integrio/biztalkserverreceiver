@@ -11,6 +11,8 @@ type Config struct {
 	scraperhelper.ControllerConfig `mapstructure:",squash"`
 	Endpoint                       string `mapstructure:"endpoint"`
 	Interval                       string `mapstructure:"interval"`
+	Username                       string `mapstructure:"username"` // TODO: Refactor into auth sub struct?
+	Password                       string `mapstructure:"password"`
 }
 
 // Validate checks if the receiver configuration is valid

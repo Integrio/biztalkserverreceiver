@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/Integrio/biztalk-server-go/client"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/receiver"
@@ -34,10 +35,17 @@ func NewFactory() receiver.Factory {
 func createMetricsReceiver(_ context.Context, params receiver.Settings, conf component.Config, consumer consumer.Metrics) (receiver.Metrics, error) {
 	logger := params.Logger
 	smrCfg := conf.(*Config)
-	simplemetricReceiver := &biztalkservermetricsScraper{
+
+	biztalkClient, err := client.NewClientBuilder(smrCfg.Endpoint).UseNtlmAuth(smrCfg.Username, smrCfg.Password).Build()
+	if err != nil {
+		return nil, err
+	}
+
+	simpleMetricReceiver := &biztalkservermetricsScraper{
 		logger:       logger,
 		nextConsumer: consumer,
 		config:       smrCfg,
+		client:       biztalkClient,
 	}
-	return simplemetricReceiver, nil
+	return simpleMetricReceiver, nil
 }
