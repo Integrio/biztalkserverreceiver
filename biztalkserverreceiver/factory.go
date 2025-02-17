@@ -2,9 +2,12 @@
 
 import (
 	"context"
+	"github.com/Integrio/biztalkserverreceiver/biztalkserverreceiver/internal/metadata"
+	"go.opentelemetry.io/collector/scraper"
+	"go.opentelemetry.io/collector/scraper/scraperhelper"
+	"go.uber.org/zap"
 	"time"
 
-	"github.com/Integrio/biztalk-server-go/client"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/receiver"
@@ -29,23 +32,39 @@ func NewFactory() receiver.Factory {
 	return receiver.NewFactory(
 		typeStr,
 		createDefaultConfig,
-		receiver.WithMetrics(createMetricsReceiver, component.StabilityLevelAlpha))
+		receiver.WithMetrics(createMetricsReceiver, metadata.MetricsStability))
 }
 
-func createMetricsReceiver(_ context.Context, params receiver.Settings, conf component.Config, consumer consumer.Metrics) (receiver.Metrics, error) {
-	logger := params.Logger
+func setupScraper(logger *zap.Logger, config *Config, settings receiver.Settings) *biztalkservermetricsScraper {
+	return &biztalkservermetricsScraper{
+		logger: logger,
+		config: config,
+		mb:     metadata.NewMetricsBuilder(config.MetricsBuilderConfig, settings),
+	}
+}
+
+func createMetricsReceiver(
+	_ context.Context,
+	params receiver.Settings,
+	conf component.Config,
+	consumer consumer.Metrics,
+) (receiver.Metrics, error) {
 	smrCfg := conf.(*Config)
 
-	biztalkClient, err := client.NewClientBuilder(smrCfg.Endpoint).UseNtlmAuth(smrCfg.Username, smrCfg.Password).Build()
+	biztalkScraper := setupScraper(params.Logger, smrCfg, params)
+	sc, err := scraper.NewMetrics(
+		biztalkScraper.scrape,
+		scraper.WithStart(biztalkScraper.Start),
+		scraper.WithShutdown(biztalkScraper.Shutdown),
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	simpleMetricReceiver := &biztalkservermetricsScraper{
-		logger:       logger,
-		nextConsumer: consumer,
-		config:       smrCfg,
-		client:       biztalkClient,
-	}
-	return simpleMetricReceiver, nil
+	return scraperhelper.NewMetricsController(
+		&smrCfg.ControllerConfig,
+		params,
+		consumer,
+		scraperhelper.AddScraper(metadata.Type, sc),
+	)
 }

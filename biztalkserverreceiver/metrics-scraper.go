@@ -2,94 +2,60 @@ package biztalkserverreceiver
 
 import (
 	"context"
-	errors2 "errors"
+	"errors"
 	"fmt"
 	"github.com/Integrio/biztalk-server-go/client"
+	"github.com/Integrio/biztalkserverreceiver/biztalkserverreceiver/internal/metadata"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/scraper/scrapererror"
 	"go.uber.org/zap"
-	"strconv"
+	"strings"
 	"time"
 )
 
 type biztalkservermetricsScraper struct {
-	host          component.Host
-	cancel        context.CancelFunc
-	logger        *zap.Logger
-	nextConsumer  consumer.Metrics
-	config        *Config
-	simpleGauge   int64
-	simpleCounter int64
-	client        *client.Client
+	host         component.Host
+	cancel       context.CancelFunc
+	logger       *zap.Logger
+	nextConsumer consumer.Metrics
+	config       *Config
+	client       *client.Client
+	mb           *metadata.MetricsBuilder
 }
 
-func (smr *biztalkservermetricsScraper) scrapeMetrics(ctx context.Context, metrics *pmetric.ResourceMetrics) error {
-	errors := make([]error, 0)
-
-	err := smr.scrapeOrchestrations(ctx, metrics)
-	if err != nil {
-		errors = append(errors, err)
-		smr.logger.Error("Failed to scrape metrics", zap.Error(err))
-	}
-
-	err = smr.scrapeReceiveLocations(ctx, metrics)
-	if err != nil {
-		errors = append(errors, err)
-		smr.logger.Error("Failed to scrape metrics", zap.Error(err))
-	}
-
-	err = smr.scrapeSendPorts(ctx, metrics)
-	if err != nil {
-		errors = append(errors, err)
-		smr.logger.Error("Failed to scrape metrics", zap.Error(err))
-	}
-
-	err = smr.scrapeSendPortGroups(ctx, metrics)
-	if err != nil {
-		errors = append(errors, err)
-		smr.logger.Error("Failed to scrape metrics", zap.Error(err))
-	}
-
-	err = smr.scrapeHostInstances(ctx, metrics)
-	if err != nil {
-		errors = append(errors, err)
-		smr.logger.Error("Failed to scrape metrics", zap.Error(err))
-	}
-
-	return errors2.Join(errors...)
+type instanceInfo struct {
+	serviceType string
+	application string
 }
 
-func (smr *biztalkservermetricsScraper) Start(ctx context.Context, host component.Host) error {
+func (smr *biztalkservermetricsScraper) Start(ctx context.Context, host component.Host) (err error) {
 	smr.host = host
 	ctx = context.Background()
 	ctx, smr.cancel = context.WithCancel(ctx)
-	interval, _ := time.ParseDuration(smr.config.Interval)
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
 
-		for {
-			select {
-			case <-ticker.C:
-				smr.logger.Info("Start processing metrcis")
-				//ts := pcommon.NewTimestampFromTime(time.Now())
+	clientBuilder := client.NewClientBuilder(smr.config.Endpoint)
+	switch smr.config.Auth {
+	case "ntlm":
+		smr.logger.Debug("Continuing with NTLM authentication")
+		clientBuilder.UseNtlmAuth(smr.config.Username, smr.config.Password)
+		break
+	case "basic":
+		smr.logger.Debug("Continuing with basic authentication")
+		clientBuilder.UseBasicAuth(smr.config.Username, smr.config.Password)
+		break
+	default:
+		smr.logger.Debug("Continuing without authentication")
+	}
 
-				metrics := pmetric.NewMetrics()
-				resourceMetrics := metrics.ResourceMetrics().AppendEmpty()
+	smr.client, err = clientBuilder.Build()
+	if err != nil {
+		return err
+	}
 
-				smr.scrapeMetrics(ctx, &resourceMetrics)
-
-				err := smr.nextConsumer.ConsumeMetrics(ctx, metrics)
-				if err != nil {
-					smr.logger.Error(err.Error())
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
+	smr.logger.Info("Start processing metrics")
 
 	return nil
 }
@@ -101,253 +67,205 @@ func (smr *biztalkservermetricsScraper) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-func (smr *biztalkservermetricsScraper) scrapeOrchestrations(ctx context.Context, rm *pmetric.ResourceMetrics) error {
+func (smr *biztalkservermetricsScraper) scrape(ctx context.Context) (pmetric.Metrics, error) {
+	if smr.client == nil {
+		return pmetric.NewMetrics(), errors.New("client not initialized")
+	}
+
+	scrapeErrors := scrapererror.ScrapeErrors{}
+
+	smr.scrapeOrchestrations(ctx, &scrapeErrors)
+	smr.scrapeReceiveLocations(ctx, &scrapeErrors)
+	smr.scrapeSendPorts(ctx, &scrapeErrors)
+	smr.scrapeSendPortGroups(ctx, &scrapeErrors)
+	smr.scrapeHostInstances(ctx, &scrapeErrors)
+
+	instanceInfoMap := map[string]*instanceInfo{}
+	instanceInfoMap = smr.scrapeSuspendedInstances(ctx, &scrapeErrors)
+	smr.scrapeSuspendedMessages(ctx, &scrapeErrors, instanceInfoMap)
+
+	rb := smr.mb.NewResourceBuilder()
+	rb.SetBiztalkName(smr.config.Endpoint)
+	return smr.mb.Emit(metadata.WithResource(rb.Emit())), scrapeErrors.Combine()
+}
+
+func (smr *biztalkservermetricsScraper) scrapeOrchestrations(ctx context.Context, errors *scrapererror.ScrapeErrors) {
+	var orchestrationStatusMap = map[string]int64{
+		"unenlisted": 0,
+		"started":    1,
+		"enlisted":   2,
+	}
+
 	orchestrations, err := smr.client.GetOrchestrations(ctx)
 	if err != nil {
-		smr.logger.Error(err.Error())
+		errors.Add(err)
+		return
 	}
-
-	scopeMetrics := rm.ScopeMetrics().AppendEmpty()
 
 	for _, orch := range orchestrations {
-		metric := scopeMetrics.Metrics().AppendEmpty()
-		err := recordOrchestrationMetrics(&metric, &orch)
-		if err != nil {
-			smr.logger.Error(err.Error())
+		statusStr := strings.ToLower(orch.Status)
+
+		value, valueOk := orchestrationStatusMap[statusStr]
+		status, statusOk := metadata.MapAttributeOrchestrationStatus[statusStr]
+		if !valueOk || !statusOk {
+			err := fmt.Errorf("orchestration %s has invalid status %s", orch.FullName, orch.Status)
+			errors.AddPartial(1, err)
+			continue
 		}
-	}
 
-	return nil
+		now := pcommon.NewTimestampFromTime(time.Now())
+		smr.mb.RecordBiztalkOrchestrationsStatusDataPoint(now, value, status,
+			orch.FullName, orch.Description, orch.Host, orch.ApplicationName)
+	}
 }
 
-func recordOrchestrationMetrics(metric *pmetric.Metric, orch *client.Orchestration) error {
-	metric.SetName("biztalk.orchestrations_status")
-	metric.SetDescription("Status of orchestrations in BizTalk Server.")
-	metric.SetUnit("1")
-	metric.SetEmptyGauge()
-
-	var status int64
-	switch orch.Status {
-	case "Unenlisted":
-		status = 0
-		break
-	case "Started":
-		status = 1
-		break
-	case "Enlisted":
-		status = 2
-		break
-	default:
-		return fmt.Errorf("orchestration %s has invalid status %s", orch.FullName, orch.Status)
-	}
-
-	dp := metric.Gauge().DataPoints().AppendEmpty()
-	dp.SetTimestamp(pcommon.NewTimestampFromTime(time.Now()))
-	dp.SetIntValue(status)
-
-	dp.Attributes().PutStr("orchestration.full_name", orch.FullName)
-	dp.Attributes().PutStr("orchestration.status", orch.Status)
-	dp.Attributes().PutStr("orchestration.description", orch.Description)
-	dp.Attributes().PutStr("orchestration.host", orch.Host)
-	dp.Attributes().PutStr("assembly_name", orch.AssemblyName)
-	dp.Attributes().PutStr("application_name", orch.AssemblyName)
-
-	return nil
-}
-
-func (smr *biztalkservermetricsScraper) scrapeReceiveLocations(ctx context.Context, rm *pmetric.ResourceMetrics) error {
+func (smr *biztalkservermetricsScraper) scrapeReceiveLocations(ctx context.Context, errors *scrapererror.ScrapeErrors) {
 	receiveLocations, err := smr.client.GetReceiveLocations(ctx)
 	if err != nil {
-		smr.logger.Error(err.Error())
+		errors.Add(err)
+		return
 	}
-
-	scopeMetrics := rm.ScopeMetrics().AppendEmpty()
 
 	for _, rl := range receiveLocations {
-		metric := scopeMetrics.Metrics().AppendEmpty()
-		err := recordReceiveLocationMetrics(&metric, &rl)
-		if err != nil {
-			smr.logger.Error(err.Error())
-		}
+		now := pcommon.NewTimestampFromTime(time.Now())
+		value := int64(boolToInt(rl.Enable))
+		smr.mb.RecordBiztalkReceiveLocationsEnabledDataPoint(now, value, rl.Enable, rl.Name, rl.Description)
+	}
+}
+
+func (smr *biztalkservermetricsScraper) scrapeSendPorts(ctx context.Context, errors *scrapererror.ScrapeErrors) {
+	var sendPortStatusMap = map[string]int64{
+		"bound":   0,
+		"started": 1,
+		"stopped": 2,
 	}
 
-	return nil
-}
-
-func recordReceiveLocationMetrics(metric *pmetric.Metric, rl *client.ReceiveLocation) error {
-	metric.SetName("biztalk.receive_locations_status")
-	metric.SetDescription("Enable status of receive locations in BizTalk Server.")
-	metric.SetUnit("1")
-	metric.SetEmptyGauge()
-
-	dp := metric.Gauge().DataPoints().AppendEmpty()
-	dp.SetTimestamp(pcommon.NewTimestampFromTime(time.Now()))
-	dp.SetIntValue(int64(boolToInt(rl.Enable)))
-
-	dp.Attributes().PutStr("receive_location.name", rl.Name)
-	dp.Attributes().PutStr("receive_location.status", strconv.FormatBool(rl.Enable))
-	dp.Attributes().PutStr("receive_location.description", rl.Description)
-
-	return nil
-}
-
-func (smr *biztalkservermetricsScraper) scrapeSendPorts(ctx context.Context, rm *pmetric.ResourceMetrics) error {
 	sendPorts, err := smr.client.GetSendPorts(ctx)
 	if err != nil {
-		smr.logger.Error(err.Error())
+		errors.Add(err)
+		return
 	}
-
-	scopeMetrics := rm.ScopeMetrics().AppendEmpty()
 
 	for _, sp := range sendPorts {
-		metric := scopeMetrics.Metrics().AppendEmpty()
-		err := recordSendPortMetrics(&metric, &sp)
-		if err != nil {
-			smr.logger.Error(err.Error())
+		statusStr := strings.ToLower(sp.Status)
+
+		value, valueOk := sendPortStatusMap[statusStr]
+		status, statusOk := metadata.MapAttributeSendPortStatus[statusStr]
+		if !valueOk || !statusOk {
+			err := fmt.Errorf("send port %s has invalid status %s", sp.Name, sp.Status)
+			errors.AddPartial(1, err)
+			continue
 		}
-	}
 
-	return nil
+		now := pcommon.NewTimestampFromTime(time.Now())
+		smr.mb.RecordBiztalkSendPortsStatusDataPoint(now, value, status, sp.Name, sp.Description, sp.ApplicationName)
+	}
 }
 
-func recordSendPortMetrics(metric *pmetric.Metric, sp *client.SendPort) error {
-	metric.SetName("biztalk.send_ports_status")
-	metric.SetDescription("Status of send ports in BizTalk Server.")
-	metric.SetUnit("1")
-	metric.SetEmptyGauge()
-
-	var status int64
-	switch sp.Status {
-	case "Bound":
-		status = 0
-		break
-	case "Started":
-		status = 1
-		break
-	case "Stopped":
-		status = 2
-		break
-	default:
-		return fmt.Errorf("send port %s has invalid status %s", sp.Name, sp.Status)
+func (smr *biztalkservermetricsScraper) scrapeSendPortGroups(ctx context.Context, errors *scrapererror.ScrapeErrors) {
+	var sendPortGroupStatusMap = map[string]int64{
+		"bound":   0,
+		"started": 1,
+		"stopped": 2,
 	}
 
-	dp := metric.Gauge().DataPoints().AppendEmpty()
-	dp.SetTimestamp(pcommon.NewTimestampFromTime(time.Now()))
-	dp.SetIntValue(status)
-
-	dp.Attributes().PutStr("send_port.name", sp.Name)
-	dp.Attributes().PutStr("send_port.status", sp.Status)
-	dp.Attributes().PutStr("send_port.description", sp.Description)
-	dp.Attributes().PutStr("application_name", sp.ApplicationName)
-
-	return nil
-}
-
-func (smr *biztalkservermetricsScraper) scrapeSendPortGroups(ctx context.Context, rm *pmetric.ResourceMetrics) error {
 	spGroups, err := smr.client.GetSendPortGroups(ctx)
 	if err != nil {
-		smr.logger.Error(err.Error())
+		errors.Add(err)
+		return
 	}
-
-	scopeMetrics := rm.ScopeMetrics().AppendEmpty()
 
 	for _, spg := range spGroups {
-		metric := scopeMetrics.Metrics().AppendEmpty()
-		err := recordSendPortGroupMetrics(&metric, &spg)
-		if err != nil {
-			smr.logger.Error(err.Error())
+		statusStr := strings.ToLower(spg.Status)
+
+		value, valueOk := sendPortGroupStatusMap[statusStr]
+		status, statusOk := metadata.MapAttributeSendPortGroupStatus[statusStr]
+		if !valueOk || !statusOk {
+			err := fmt.Errorf("send port group %s has invalid status %s", spg.Name, spg.Status)
+			errors.AddPartial(1, err)
+			continue
 		}
-	}
 
-	return nil
+		now := pcommon.NewTimestampFromTime(time.Now())
+		smr.mb.RecordBiztalkSendportGroupsStatusDataPoint(now, value, status, spg.Name, spg.Description, spg.ApplicationName)
+	}
 }
 
-func recordSendPortGroupMetrics(metric *pmetric.Metric, spg *client.SendPortGroup) error {
-	metric.SetName("biztalk.send_port_group_status")
-	metric.SetDescription("Status of send port groups in BizTalk Server.")
-	metric.SetUnit("1")
-	metric.SetEmptyGauge()
-
-	var status int64
-	switch spg.Status {
-	case "Bound":
-		status = 0
-		break
-	case "Started":
-		status = 1
-		break
-	case "Stopped":
-		status = 2
-		break
-	default:
-		return fmt.Errorf("send port group %s has invalid status %s", spg.Name, spg.Status)
+func (smr *biztalkservermetricsScraper) scrapeHostInstances(ctx context.Context, errors *scrapererror.ScrapeErrors) {
+	var hostInstanceStatusMap = map[string]int64{
+		"stopped": 0,
+		"running": 1,
+		"unknown": 2,
 	}
 
-	dp := metric.Gauge().DataPoints().AppendEmpty()
-	dp.SetTimestamp(pcommon.NewTimestampFromTime(time.Now()))
-	dp.SetIntValue(status)
-
-	dp.Attributes().PutStr("send_port_group.name", spg.Name)
-	dp.Attributes().PutStr("send_port_group.status", spg.Status)
-	dp.Attributes().PutStr("send_port_group.description", spg.Description)
-	dp.Attributes().PutStr("application_name", spg.ApplicationName)
-
-	return nil
-}
-
-func (smr *biztalkservermetricsScraper) scrapeHostInstances(ctx context.Context, rm *pmetric.ResourceMetrics) error {
 	hostInstances, err := smr.client.GetHostInstances(ctx)
 	if err != nil {
-		smr.logger.Error(err.Error())
+		errors.Add(err)
 	}
 
-	scopeMetrics := rm.ScopeMetrics().AppendEmpty()
-
 	for _, hi := range hostInstances {
-		metric := scopeMetrics.Metrics().AppendEmpty()
-		err := recordHostInstanceMetrics(&metric, &hi)
-		if err != nil {
-			smr.logger.Error(err.Error())
+		statusStr := strings.ToLower(hi.ServiceState)
+
+		value, valueOk := hostInstanceStatusMap[statusStr]
+		status, statusOk := metadata.MapAttributeHostInstanceStatus[statusStr]
+		if !valueOk || !statusOk {
+			err := fmt.Errorf("send port group %s has invalid service state %s", hi.Name, hi.ServiceState)
+			errors.AddPartial(1, err)
+			continue
+		}
+
+		now := pcommon.NewTimestampFromTime(time.Now())
+		smr.mb.RecordBiztalkHostInstancesStatusDataPoint(now, value, status, hi.Name, hi.HostName)
+	}
+}
+
+func (smr *biztalkservermetricsScraper) scrapeSuspendedInstances(ctx context.Context, errors *scrapererror.ScrapeErrors) map[string]*instanceInfo {
+	instances, err := smr.client.GetOperationalDataInstances(ctx)
+	if err != nil {
+		errors.Add(err)
+		return make(map[string]*instanceInfo)
+	}
+
+	instanceInfoMap := make(map[string]*instanceInfo)
+	for _, inst := range instances {
+		if inst.InstanceStatus != "Suspended" && inst.InstanceStatus != "SuspendedNotResumable" {
+			continue
+		}
+
+		now := pcommon.NewTimestampFromTime(time.Now())
+		smr.mb.RecordBiztalkSuspendedInstancesDataPoint(now, 1, inst.Application, inst.ServiceType, inst.HostName, inst.Class)
+
+		instanceInfoMap[inst.ServiceTypeID.String()] = &instanceInfo{
+			serviceType: inst.ServiceType,
+			application: inst.Application,
 		}
 	}
 
-	return nil
+	return instanceInfoMap
 }
 
-func recordHostInstanceMetrics(metric *pmetric.Metric, hi *client.HostInstance) error {
-	metric.SetName("biztalk.host_instance_status")
-	metric.SetDescription("Status of host instances in BizTalk Server.")
-	metric.SetUnit("1")
-	metric.SetEmptyGauge()
-
-	var status int64
-	var statusStr string
-	switch hi.IsDisabled {
-	case true:
-		statusStr = "Stopped"
-		status = 0
-		break
-	case false:
-		statusStr = "Running"
-		status = 2
-		break
-	default:
-		statusStr = "Unknown" // TODO: When should this be unknown? https://github.com/Integrio/biztalkserverreceiver/blob/64140539955b7fda174e824d8eacebd29d2eeb81/README.md?plain=1#L271
-		status = 1
-		break
+func (smr *biztalkservermetricsScraper) scrapeSuspendedMessages(ctx context.Context, errors *scrapererror.ScrapeErrors, instanceInfoMap map[string]*instanceInfo) {
+	messages, err := smr.client.GetOperationalDataMessages(ctx)
+	if err != nil {
+		errors.Add(err)
+		return
 	}
 
-	dp := metric.Gauge().DataPoints().AppendEmpty()
-	dp.SetTimestamp(pcommon.NewTimestampFromTime(time.Now()))
-	dp.SetIntValue(status)
+	for _, msg := range messages {
+		if msg.Status != "Suspended" && msg.Status != "SuspendedNotResumable" {
+			continue
+		}
 
-	dp.Attributes().PutStr("host_instance.name", hi.Name)
-	dp.Attributes().PutStr("host_instance.status", statusStr)
-	dp.Attributes().PutStr("host_instance.service_state", hi.ServiceState)
-	dp.Attributes().PutStr("host_instance.host_name", hi.HostName)
-	dp.Attributes().PutStr("host_instance.running_server", hi.RunningServer)
+		now := pcommon.NewTimestampFromTime(time.Now())
 
-	return nil
+		info, ok := instanceInfoMap[msg.ServiceTypeID.String()]
+		if !ok {
+			smr.logger.Warn("found suspended message with no correlating suspended instance", zap.String("serviceTypeId", msg.ServiceTypeID.String()))
+			smr.mb.RecordBiztalkSuspendedMessagesDataPoint(now, 1, "", "", "")
+		}
+
+		smr.mb.RecordBiztalkSuspendedMessagesDataPoint(now, 1, info.application, info.serviceType, msg.HostName)
+	}
 }
 
 func boolToInt(b bool) int {

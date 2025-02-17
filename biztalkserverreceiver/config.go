@@ -2,6 +2,7 @@
 
 import (
 	"fmt"
+	"github.com/Integrio/biztalkserverreceiver/biztalkserverreceiver/internal/metadata"
 	"time"
 
 	"go.opentelemetry.io/collector/scraper/scraperhelper"
@@ -9,9 +10,11 @@ import (
 
 type Config struct {
 	scraperhelper.ControllerConfig `mapstructure:",squash"`
+	metadata.MetricsBuilderConfig  `mapstructure:",squash"`
 	Endpoint                       string `mapstructure:"endpoint"`
 	Interval                       string `mapstructure:"interval"`
-	Username                       string `mapstructure:"username"` // TODO: Refactor into auth sub struct?
+	Auth                           string `mapstructure:"auth"`
+	Username                       string `mapstructure:"username"`
 	Password                       string `mapstructure:"password"`
 }
 
