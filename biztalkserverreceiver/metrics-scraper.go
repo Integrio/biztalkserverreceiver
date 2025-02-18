@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/receiver"
 	"go.opentelemetry.io/collector/scraper/scrapererror"
 	"go.uber.org/zap"
 	"strings"
@@ -24,11 +25,21 @@ type biztalkservermetricsScraper struct {
 	config       *Config
 	client       *client.Client
 	mb           *metadata.MetricsBuilder
+	settings     component.TelemetrySettings
 }
 
 type instanceInfo struct {
 	serviceType string
 	application string
+}
+
+func newScraper(logger *zap.Logger, config *Config, settings receiver.Settings) *biztalkservermetricsScraper {
+	return &biztalkservermetricsScraper{
+		logger:   logger,
+		config:   config,
+		mb:       metadata.NewMetricsBuilder(config.MetricsBuilderConfig, settings),
+		settings: settings.TelemetrySettings,
+	}
 }
 
 func (smr *biztalkservermetricsScraper) Start(ctx context.Context, host component.Host) (err error) {

@@ -3,14 +3,12 @@
 import (
 	"context"
 	"github.com/Integrio/biztalkserverreceiver/biztalkserverreceiver/internal/metadata"
-	"go.opentelemetry.io/collector/scraper"
-	"go.opentelemetry.io/collector/scraper/scraperhelper"
-	"go.uber.org/zap"
-	"time"
-
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/scraper"
+	"go.opentelemetry.io/collector/scraper/scraperhelper"
+	"time"
 )
 
 var (
@@ -22,9 +20,13 @@ const (
 )
 
 func createDefaultConfig() component.Config {
+	cfg := scraperhelper.NewDefaultControllerConfig()
+	cfg.CollectionInterval = defaultInterval
+
 	return &Config{
-		Endpoint: "http://localhost/biztalk/",
-		Interval: string(defaultInterval),
+		Endpoint:             "http://localhost/biztalk/",
+		ControllerConfig:     cfg,
+		MetricsBuilderConfig: metadata.DefaultMetricsBuilderConfig(),
 	}
 }
 
@@ -35,14 +37,6 @@ func NewFactory() receiver.Factory {
 		receiver.WithMetrics(createMetricsReceiver, metadata.MetricsStability))
 }
 
-func setupScraper(logger *zap.Logger, config *Config, settings receiver.Settings) *biztalkservermetricsScraper {
-	return &biztalkservermetricsScraper{
-		logger: logger,
-		config: config,
-		mb:     metadata.NewMetricsBuilder(config.MetricsBuilderConfig, settings),
-	}
-}
-
 func createMetricsReceiver(
 	_ context.Context,
 	params receiver.Settings,
@@ -51,7 +45,7 @@ func createMetricsReceiver(
 ) (receiver.Metrics, error) {
 	smrCfg := conf.(*Config)
 
-	biztalkScraper := setupScraper(params.Logger, smrCfg, params)
+	biztalkScraper := newScraper(params.Logger, smrCfg, params)
 	sc, err := scraper.NewMetrics(
 		biztalkScraper.scrape,
 		scraper.WithStart(biztalkScraper.Start),
