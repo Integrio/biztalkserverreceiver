@@ -220,7 +220,7 @@ func (smr *biztalkservermetricsScraper) scrapeHostInstances(ctx context.Context,
 		value, valueOk := hostInstanceStatusMap[statusStr]
 		status, statusOk := metadata.MapAttributeHostInstanceStatus[statusStr]
 		if !valueOk || !statusOk {
-			err := fmt.Errorf("send port group %s has invalid service state %s", hi.Name, hi.ServiceState)
+			err := fmt.Errorf("host instance %s has invalid service state %s", hi.Name, hi.ServiceState)
 			errors.AddPartial(1, err)
 			continue
 		}
@@ -246,9 +246,11 @@ func (smr *biztalkservermetricsScraper) scrapeSuspendedInstances(ctx context.Con
 		now := pcommon.NewTimestampFromTime(time.Now())
 		smr.mb.RecordBiztalkSuspendedInstancesDataPoint(now, 1, inst.Application, inst.ServiceType, inst.HostName, inst.Class)
 
-		instanceInfoMap[inst.ServiceTypeID.String()] = &instanceInfo{
-			serviceType: inst.ServiceType,
-			application: inst.Application,
+		if _, ok := instanceInfoMap[inst.ServiceTypeID.String()]; !ok {
+			instanceInfoMap[inst.ServiceTypeID.String()] = &instanceInfo{
+				serviceType: inst.ServiceType,
+				application: inst.Application,
+			}
 		}
 	}
 
