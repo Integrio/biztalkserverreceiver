@@ -2,6 +2,7 @@
 
 import (
 	"context"
+	"errors"
 	"github.com/Integrio/biztalkserverreceiver/biztalkserverreceiver/internal/metadata"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
@@ -19,12 +20,13 @@ const (
 	defaultInterval = 1 * time.Minute
 )
 
+var errInvalidConfig = errors.New("config was not a biztalk server receiver config")
+
 func createDefaultConfig() component.Config {
 	cfg := scraperhelper.NewDefaultControllerConfig()
 	cfg.CollectionInterval = defaultInterval
 
 	return &Config{
-		Endpoint:             "http://localhost/biztalk/",
 		ControllerConfig:     cfg,
 		MetricsBuilderConfig: metadata.DefaultMetricsBuilderConfig(),
 	}
@@ -43,7 +45,10 @@ func createMetricsReceiver(
 	conf component.Config,
 	consumer consumer.Metrics,
 ) (receiver.Metrics, error) {
-	smrCfg := conf.(*Config)
+	smrCfg, ok := conf.(*Config)
+	if !ok {
+		return nil, errInvalidConfig
+	}
 
 	biztalkScraper := newScraper(params.Logger, smrCfg, params)
 	sc, err := scraper.NewMetrics(

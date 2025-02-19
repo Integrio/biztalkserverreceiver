@@ -7,7 +7,6 @@ import (
 	"github.com/Integrio/biztalk-server-go/client"
 	"github.com/Integrio/biztalkserverreceiver/biztalkserverreceiver/internal/metadata"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/receiver"
@@ -18,20 +17,21 @@ import (
 )
 
 type biztalkservermetricsScraper struct {
-	host         component.Host
-	cancel       context.CancelFunc
-	logger       *zap.Logger
-	nextConsumer consumer.Metrics
-	config       *Config
-	client       *client.Client
-	mb           *metadata.MetricsBuilder
-	settings     component.TelemetrySettings
+	host     component.Host
+	cancel   context.CancelFunc
+	logger   *zap.Logger
+	config   *Config
+	client   *client.Client
+	mb       *metadata.MetricsBuilder
+	settings component.TelemetrySettings
 }
 
 type instanceInfo struct {
 	serviceType string
 	application string
 }
+
+var errLoggerNotInitialized = errors.New("logger not initialized")
 
 func newScraper(logger *zap.Logger, config *Config, settings receiver.Settings) *biztalkservermetricsScraper {
 	return &biztalkservermetricsScraper{
@@ -44,16 +44,19 @@ func newScraper(logger *zap.Logger, config *Config, settings receiver.Settings) 
 
 func (smr *biztalkservermetricsScraper) Start(ctx context.Context, host component.Host) (err error) {
 	smr.host = host
-	ctx = context.Background()
 	ctx, smr.cancel = context.WithCancel(ctx)
+
+	if smr.logger == nil {
+		return errLoggerNotInitialized
+	}
 
 	clientBuilder := client.NewClientBuilder(smr.config.Endpoint)
 	switch smr.config.Auth {
-	case "ntlm":
+	case ntlmAuth:
 		smr.logger.Debug("Continuing with NTLM authentication")
 		clientBuilder.UseNtlmAuth(smr.config.Username, smr.config.Password)
 		break
-	case "basic":
+	case basicAuth:
 		smr.logger.Debug("Continuing with basic authentication")
 		clientBuilder.UseBasicAuth(smr.config.Username, smr.config.Password)
 		break
@@ -61,12 +64,9 @@ func (smr *biztalkservermetricsScraper) Start(ctx context.Context, host componen
 		smr.logger.Debug("Continuing without authentication")
 	}
 
-	smr.client, err = clientBuilder.Build()
-	if err != nil {
+	if smr.client, err = clientBuilder.Build(); err != nil {
 		return err
 	}
-
-	smr.logger.Info("Start processing metrics")
 
 	return nil
 }
