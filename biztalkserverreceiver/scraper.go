@@ -275,9 +275,9 @@ func (smr *biztalkservermetricsScraper) scrapeSuspendedMessages(ctx context.Cont
 		if !ok {
 			smr.logger.Warn("found suspended message with no correlating suspended instance", zap.String("serviceTypeId", msg.ServiceTypeID.String()))
 			smr.mb.RecordBiztalkSuspendedMessagesDataPoint(now, 1, "", "", "")
+		} else {
+			smr.mb.RecordBiztalkSuspendedMessagesDataPoint(now, 1, info.application, info.serviceType, msg.HostName)
 		}
-
-		smr.mb.RecordBiztalkSuspendedMessagesDataPoint(now, 1, info.application, info.serviceType, msg.HostName)
 	}
 }
 
