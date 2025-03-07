@@ -21,8 +21,13 @@
 go.work
 go.work.sum
 
+.idea
+config.yaml
+
 # env file
 .env
 
-.idea
-config.yaml
+collector/
+ocb
+build/
+coverage/
